@@ -1,0 +1,22 @@
+[project]
+name = "radio-caster"
+version = "0.1.0"
+description = "Cast internet radio to a Chromecast from the macOS menu bar or the command line"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Bartosz Fenski" }]
+requires-python = ">=3.11"
+dependencies = [
+    "pychromecast>=14",
+    "rumps>=0.4; sys_platform == 'darwin'",
+]
+
+[project.scripts]
+radio-caster = "radio_caster.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/fenio/radio-caster"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
