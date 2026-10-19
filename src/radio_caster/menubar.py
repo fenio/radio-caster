@@ -1,16 +1,20 @@
 """Radio Caster: menu bar app for casting internet radio to a Chromecast.
 
+The menu gives quick access to favourites; the main window (window.py) adds
+search, favourites management and playback controls.
 Favourites come from ~/.config/radio-caster/stations.json (see core.py).
 """
 
 import subprocess
 import threading
-import time
 
 import AppKit
 import pychromecast
 import rumps
+import zeroconf
+from PyObjCTools.AppHelper import callAfter
 from pychromecast.config import APP_MEDIA_RECEIVER
+from pychromecast.discovery import CastBrowser, SimpleCastListener
 
 from .core import (
     CONFIG,
@@ -18,11 +22,14 @@ from .core import (
     describe,
     icon_file,
     load_favourites,
+    load_settings,
     now_playing,
     play,
     remove_favourite,
+    save_setting,
     search_directory,
 )
+from .window import MainWindow, install_edit_menu
 
 ICON = "📻"
 POLL_SECONDS = 15
@@ -31,18 +38,30 @@ POLL_SECONDS = 15
 class RadioApp(rumps.App):
     def __init__(self, device=None):
         super().__init__("Radio Caster", title=ICON, quit_button=None)
-        self.cast = None
-        self.device = device
+        self.cast = None  # the connected speaker
+        self.speaker = device or load_settings().get("speaker")  # preferred speaker's name, if chosen
+        self.devices = {}  # name -> CastInfo of every speaker on the network
+        self.connecting = None  # CastInfo of a speaker being connected to
+        self.move_station = None  # Station to carry over to the next speaker (Spotify-style switch)
         self.favourites = []
         self.config_mtime = None
-        self.results = []  # (Station, details) from the last directory search
         self.last_played = None  # so stations played from search results are recognised too
         self.playing = None  # Station, maintained by refresh() from the cast status
         self.info = None  # NowPlaying of self.playing, maintained by the poll thread
+        self.station_changed = threading.Event()  # wakes the poll thread early
+        self.volume = None  # 0-100, maintained by refresh()
+        self.starting = None  # Station being started, until the speaker reports it playing
+        self.error = None
         self.icons = {}  # icon URL -> local file, filled in the background
+        self.search = {"query": "", "busy": False, "error": None}
+        self.results = []  # SearchResults from the last directory search
+        self.window = None  # created on first open
 
         self.load_config()
-        threading.Thread(target=self.connect, daemon=True).start()
+        self.zconf = zeroconf.Zeroconf()
+        changed = lambda *_: callAfter(self.on_devices_changed)  # noqa: E731 - discovery runs on its own thread
+        self.browser = CastBrowser(SimpleCastListener(changed, changed, changed), self.zconf)
+        self.browser.start_discovery()
         threading.Thread(target=self.poll_now_playing, daemon=True).start()
         rumps.Timer(self.refresh, 2).start()
 
@@ -58,29 +77,17 @@ class RadioApp(rumps.App):
         self.song_item = rumps.MenuItem("Nothing playing")
         self.show_item = rumps.MenuItem(" ")
         self.station_items = {s.id: rumps.MenuItem(s.name, callback=self.on_station) for s in self.favourites}
-
-        results_menu = rumps.MenuItem("Search results")
-        seen = set()
-        for station, details in self.results:
-            title = f"{station.name}  ({details})" if details else station.name
-            while title in seen:  # the directory has many near-duplicates
-                title += " "
-            seen.add(title)
-            entry = rumps.MenuItem(title)
-            entry.add(rumps.MenuItem("Play", callback=lambda _, s=station: self.start(s)))
-            entry.add(rumps.MenuItem("Add to favourites", callback=lambda _, s=station: self.on_add(s)))
-            results_menu.add(entry)
-
-        remove_menu = rumps.MenuItem("Remove from favourites")
-        for s in self.favourites:
-            remove_menu.add(rumps.MenuItem(s.name, callback=lambda _, s=s: self.on_remove(s)))
-
         self.volume_menu = rumps.MenuItem("Volume")
         for v in range(10, 101, 10):
             self.volume_menu.add(rumps.MenuItem(f"{v}%", callback=self.on_volume))
-        self.device_item = rumps.MenuItem(
-            f"Device: {self.cast.cast_info.friendly_name}" if self.cast else "Searching for Chromecast…"
-        )
+        self.speaker_menu = rumps.MenuItem(self.speaker_title())
+        for name, info in self.sorted_devices():
+            item = rumps.MenuItem(
+                f"{name} (group)" if info.cast_type == "group" else name,
+                callback=lambda _, n=name: self.select_speaker(n),
+            )
+            item.state = int(self.cast is not None and self.cast.cast_info.friendly_name == name)
+            self.speaker_menu.add(item)
 
         self.menu.clear()
         self.menu = [
@@ -89,33 +96,187 @@ class RadioApp(rumps.App):
             None,
             *self.station_items.values(),
             None,
-            rumps.MenuItem("Search stations…", callback=self.on_search),
-            *([results_menu] if self.results else []),
-            remove_menu,
-            rumps.MenuItem("Edit stations file…", callback=lambda _: subprocess.run(["open", "-t", str(CONFIG)])),
+            rumps.MenuItem("Open Radio Caster…", callback=lambda _: self.open_window(), key="o"),
+            rumps.MenuItem("Find Stations…", callback=lambda _: self.open_window(focus_search=True), key="f"),
             None,
-            rumps.MenuItem("Stop", callback=self.on_stop),
+            rumps.MenuItem("Stop", callback=lambda _: self.stop()),
             self.volume_menu,
+            self.speaker_menu,
             None,
-            self.device_item,
-            rumps.MenuItem("Quit", callback=rumps.quit_application),
+            rumps.MenuItem("Quit Radio Caster", callback=rumps.quit_application, key="q"),
         ]
 
-    # --- Background work --------------------------------------------------------
+    def speaker_title(self):
+        if self.connecting:
+            return f"Speaker: connecting to {self.connecting.friendly_name}…"
+        if self.cast:
+            return f"Speaker: {self.cast.cast_info.friendly_name}"
+        if self.speaker:
+            return f"Speaker: looking for {self.speaker}…"
+        return "Speaker: looking…"
 
-    def connect(self):
-        while self.cast is None:
-            if self.device:
-                casts, browser = pychromecast.get_listed_chromecasts(friendly_names=[self.device], timeout=10)
-            else:
-                casts, browser = pychromecast.get_chromecasts(timeout=10)
-            if casts:
-                # Keep the browser running: the cast connection uses it to (re)resolve the device.
-                casts[0].wait()
-                self.cast = casts[0]
-            else:
-                browser.stop_discovery()
-                time.sleep(30)
+    def sorted_devices(self):
+        """Speakers first, then groups, each alphabetically."""
+        return sorted(self.devices.items(), key=lambda kv: (kv[1].cast_type == "group", kv[0].casefold()))
+
+    # --- Speakers -------------------------------------------------------------
+
+    def on_devices_changed(self):
+        self.devices = {
+            info.friendly_name: info for info in list(self.browser.devices.values()) if info.friendly_name
+        }
+        self.ensure_connected()
+        self.build_menu()
+        self.push_state()
+
+    def ensure_connected(self):
+        """Connect to the preferred speaker (or any, if none chosen) when not already on it."""
+        if self.connecting:
+            return  # connect_to() calls back here when done
+        if self.speaker:
+            target = self.devices.get(self.speaker)  # wait for it rather than falling back to another
+        elif self.cast:
+            return
+        else:
+            target = next((info for _, info in self.sorted_devices()), None)
+        if target and not (self.cast and self.cast.uuid == target.uuid):
+            self.connect_to(target)
+
+    def select_speaker(self, name):
+        if self.cast and self.cast.cast_info.friendly_name == name:
+            return
+        self.speaker = name
+        save_setting("speaker", name)
+        self.move_station = self.move_station or self.playing
+        self.ensure_connected()
+        self.build_menu()
+        self.push_state()
+
+    def connect_to(self, info):
+        self.connecting = info
+        old = self.cast
+        station = self.move_station
+
+        def go():
+            try:
+                cast = pychromecast.get_chromecast_from_cast_info(info, self.zconf)
+                cast.wait(timeout=10)
+                if station:
+                    play(cast, station)  # start on the new speaker first, so the gap is short
+                error = None
+            except Exception as e:
+                cast, error = None, f"Couldn't connect to {info.friendly_name}: {e}"
+
+            def done():
+                self.connecting = None
+                self.error = error
+                if cast:
+                    self.cast = cast
+                    if self.move_station == station:
+                        self.move_station = None
+                self.ensure_connected()  # the choice may have changed meanwhile
+                self.build_menu()
+                self.push_state()
+
+            callAfter(done)
+            if cast and old:
+                try:
+                    if station:
+                        old.quit_app()
+                    old.disconnect(timeout=5)
+                except Exception:
+                    pass  # the old speaker may already be gone
+
+        self.build_menu()
+        threading.Thread(target=go, daemon=True).start()
+
+    # --- Window ---------------------------------------------------------------
+
+    def open_window(self, focus_search=False):
+        if self.window is None:
+            self.window = MainWindow(self.on_window_message)
+        self.window.show(focus_search)
+        self.push_state()
+
+    def push_state(self):
+        if self.window is None or not self.window.visible:
+            return
+        favourite_streams = {s.stream for s in self.favourites}
+        playing = self.playing
+        self.window.render(
+            {
+                "speaker": self.cast.cast_info.friendly_name if self.cast else None,
+                "wanted_speaker": self.speaker,
+                "connecting": self.connecting.friendly_name if self.connecting else None,
+                "speakers": [
+                    {"name": name, "group": info.cast_type == "group"} for name, info in self.sorted_devices()
+                ],
+                "volume": self.volume,
+                "starting": self.starting.name if self.starting else None,
+                "error": self.error,
+                "playing": playing
+                and {
+                    "name": playing.name,
+                    "stream": playing.stream,
+                    "artwork": playing.artwork or playing.icon,
+                    "song": describe(self.info),
+                    "show": self.info and self.info.show,
+                },
+                "favourites": [{"id": s.id, "name": s.name, "icon": s.icon, "stream": s.stream} for s in self.favourites],
+                "search": {
+                    **self.search,
+                    "results": [
+                        {
+                            "name": r.name,
+                            "country": r.country,
+                            "icon": r.icon,
+                            "variants": [
+                                {
+                                    "label": v.label,
+                                    "stream": v.station.stream,
+                                    "favourite": v.station.stream in favourite_streams,
+                                }
+                                for v in r.variants
+                            ],
+                        }
+                        for r in self.results
+                    ],
+                },
+            }
+        )
+
+    def on_window_message(self, msg):
+        # Called on the main thread by the web view.
+        action = msg.get("action")
+        if action == "ready":
+            self.window.page_ready()
+        elif action == "play_favourite":
+            station = next((s for s in self.favourites if s.id == msg["id"]), None)
+            if station:
+                self.start(station)
+        elif action == "play_result":
+            self.start(self.results[msg["index"]].variants[msg["variant"]].station)
+        elif action == "add_result":
+            station = self.results[msg["index"]].variants[msg["variant"]].station
+            if station.stream not in {s.stream for s in self.favourites}:
+                add_favourite(station)
+                self.load_config()
+        elif action == "remove":
+            remove_favourite(msg["id"])
+            self.load_config()
+        elif action == "search":
+            self.start_search(msg["query"])
+        elif action == "stop":
+            self.stop()
+        elif action == "volume":
+            self.set_volume(msg["value"])
+        elif action == "speaker":
+            self.select_speaker(msg["name"])
+        elif action == "edit_file":
+            subprocess.run(["open", "-t", str(CONFIG)])
+        self.push_state()
+
+    # --- Background work --------------------------------------------------------
 
     def poll_now_playing(self):
         while True:
@@ -123,7 +284,9 @@ class RadioApp(rumps.App):
             info = now_playing(station) if station else None
             if station == self.playing:
                 self.info = info
-            time.sleep(POLL_SECONDS)
+                callAfter(self.push_state)
+            self.station_changed.wait(POLL_SECONDS)
+            self.station_changed.clear()
 
     def fetch_icons(self, stations):
         def go():
@@ -133,8 +296,29 @@ class RadioApp(rumps.App):
 
         threading.Thread(target=go, daemon=True).start()
 
+    def start_search(self, query):
+        self.search = {"query": query, "busy": True, "error": None}
+        self.results = []
+
+        def go():
+            try:
+                results, error = search_directory(query), None
+            except OSError as e:
+                results, error = [], str(e)
+
+            def done():
+                if self.search["query"] == query:  # ignore an older search finishing late
+                    self.results = results
+                    self.search = {"query": query, "busy": False, "error": error}
+                    self.push_state()
+
+            callAfter(done)
+
+        threading.Thread(target=go, daemon=True).start()
+
     def in_background(self, fn):
         if self.cast is None:
+            self.error = "No speaker found yet."
             rumps.notification("Radio Caster", "", "No Chromecast connected yet.")
             return
         threading.Thread(target=fn, daemon=True).start()
@@ -143,48 +327,39 @@ class RadioApp(rumps.App):
 
     def start(self, station):
         self.last_played = station
+        self.starting = station
+        self.error = None
         self.fetch_icons([station])
-        self.in_background(lambda: play(self.cast, station))
+
+        def go():
+            try:
+                play(self.cast, station)
+                error = None
+            except Exception as e:  # shown in the window instead of killing the thread silently
+                error = f"Couldn't play {station.name}: {e}"
+
+            def done():
+                if self.starting == station:
+                    self.starting = None
+                self.error = error
+                self.push_state()
+
+            callAfter(done)
+
+        self.in_background(go)
+
+    def stop(self):
+        self.in_background(lambda: self.cast.quit_app())
+
+    def set_volume(self, percent):
+        self.volume = percent
+        self.in_background(lambda: self.cast.set_volume(percent / 100))
 
     def on_station(self, sender):
         self.start(next(s for s in self.favourites if self.station_items[s.id] is sender))
 
-    def on_search(self, _):
-        AppKit.NSApp.activateIgnoringOtherApps_(True)
-        response = rumps.Window(
-            "Station name (searches radio-browser.info):",
-            "Search stations",
-            ok="Search",
-            cancel="Cancel",
-            dimensions=(280, 24),
-        ).run()
-        query = response.text.strip()
-        if not response.clicked or not query:
-            return
-        try:
-            self.results = search_directory(query)
-        except OSError as e:
-            rumps.notification("Radio Caster", "Search failed", str(e))
-            return
-        if not self.results:
-            rumps.notification("Radio Caster", "", f"No stations found for “{query}”.")
-        self.build_menu()
-
-    def on_add(self, station):
-        add_favourite(station)
-        self.load_config()
-
-    def on_remove(self, station):
-        if rumps.alert(f"Remove {station.name} from favourites?", ok="Remove", cancel="Cancel"):
-            remove_favourite(station.id)
-            self.load_config()
-
-    def on_stop(self, _):
-        self.in_background(lambda: self.cast.quit_app())
-
     def on_volume(self, sender):
-        level = int(sender.title.rstrip("%")) / 100
-        self.in_background(lambda: self.cast.set_volume(level))
+        self.set_volume(int(sender.title.rstrip("%")))
 
     # --- Status -------------------------------------------------------------------
 
@@ -192,9 +367,10 @@ class RadioApp(rumps.App):
         # Runs on the main thread, so it's safe to touch the menu here.
         if CONFIG.exists() and CONFIG.stat().st_mtime != self.config_mtime:
             self.load_config()  # stations file was edited by hand
+        self.speaker_menu.title = self.speaker_title()
         if self.cast is None:
+            self.push_state()
             return
-        self.device_item.title = f"Device: {self.cast.cast_info.friendly_name}"
 
         mc = self.cast.media_controller.status
         active = self.cast.app_id == APP_MEDIA_RECEIVER and mc.player_state in ("PLAYING", "BUFFERING")
@@ -204,7 +380,10 @@ class RadioApp(rumps.App):
             self.station_items[s.id].state = int(playing is not None and playing.stream == s.stream)
         if playing != self.playing:
             self.info = None
+            self.station_changed.set()
         self.playing = playing
+        if playing and self.starting and playing.stream == self.starting.stream:
+            self.starting = None
 
         icon = playing and self.icons.get(playing.icon)
         if icon:
@@ -222,13 +401,17 @@ class RadioApp(rumps.App):
             self.song_item.title = "Nothing playing"
             self.show_item.title = " "
 
-        volume = round((self.cast.status.volume_level or 0) * 10) * 10 if self.cast.status else None
+        if self.cast.status:
+            self.volume = round((self.cast.status.volume_level or 0) * 100)
         for item in self.volume_menu.values():
-            item.state = int(item.title == f"{volume}%")
+            item.state = int(self.volume is not None and item.title == f"{round(self.volume, -1)}%")
+
+        self.push_state()
 
 
 def run(device=None):
     app = RadioApp(device)
     # Menu bar only, no Dock icon.
     AppKit.NSApplication.sharedApplication().setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    install_edit_menu()
     app.run()

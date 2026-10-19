@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Radio Caster</title>
+<style>
+  :root {
+    --bg: #f5f5f7;
+    --card: #ffffff;
+    --text: #1d1d1f;
+    --muted: #6e6e73;
+    --line: #e3e3e8;
+    --accent: #e8452c;
+    --accent-soft: #fde9e5;
+    --hover: #f0f0f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1e;
+      --card: #2c2c2e;
+      --text: #f5f5f7;
+      --muted: #98989d;
+      --line: #3a3a3c;
+      --accent: #ff6a4d;
+      --accent-soft: #4a2a24;
+      --hover: #3a3a3c;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body {
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    padding: 16px;
+    -webkit-user-select: none;
+    cursor: default;
+  }
+  h2 {
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); margin: 20px 4px 8px;
+  }
+  .card { background: var(--card); border-radius: 12px; border: 1px solid var(--line); }
+  button {
+    font: inherit; color: var(--text); background: var(--hover); border: 1px solid var(--line);
+    border-radius: 7px; padding: 4px 10px; cursor: pointer; white-space: nowrap;
+  }
+  button:hover { filter: brightness(0.96); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+
+  /* Now playing */
+  .now { display: flex; gap: 14px; padding: 14px; align-items: center; }
+  .now .art { width: 76px; height: 76px; border-radius: 10px; flex: none; }
+  .now .meta { flex: 1; min-width: 0; }
+  .now .station { font-size: 15px; font-weight: 600; }
+  .now .song, .now .show { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .now .song { color: var(--text); margin-top: 2px; }
+  .controls { display: flex; align-items: center; gap: 10px; padding: 0 14px 14px; }
+  .controls input[type=range] { flex: 1; accent-color: var(--accent); }
+  .controls .vol { width: 36px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* Station rows */
+  .list { overflow: hidden; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-top: 1px solid var(--line); }
+  .row:first-child { border-top: 0; }
+  .row.clickable { cursor: pointer; }
+  .row.clickable:hover { background: var(--hover); }
+  .row.playing { background: var(--accent-soft); }
+  .row .icon { width: 32px; height: 32px; border-radius: 7px; flex: none; }
+  .row .name { flex: 1; min-width: 0; }
+  .row .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .sub { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .actions { display: flex; gap: 6px; }
+  .row .hover-only { visibility: hidden; }
+  .row:hover .hover-only, .row .hover-only.armed { visibility: visible; }
+  .badge { color: var(--accent); font-size: 11px; font-weight: 600; }
+  .row select {
+    font: inherit; font-size: 11px; color: var(--text); background: var(--hover);
+    border: 1px solid var(--line); border-radius: 5px; padding: 0 4px; margin: 1px 0;
+  }
+
+  img.icon, img.art { object-fit: cover; background: var(--hover); }
+  .placeholder {
+    display: flex; align-items: center; justify-content: center; font-weight: 600;
+    background: var(--accent-soft); color: var(--accent);
+  }
+
+  /* Search */
+  form { display: flex; gap: 8px; margin-bottom: 8px; }
+  input[type=search] {
+    flex: 1; font: inherit; color: var(--text); background: var(--card);
+    border: 1px solid var(--line); border-radius: 7px; padding: 5px 9px; outline: none;
+    -webkit-user-select: text;
+  }
+  input[type=search]:focus { border-color: var(--accent); }
+  .hint { color: var(--muted); padding: 10px 4px; }
+  .empty { color: var(--muted); padding: 14px; text-align: center; }
+
+  footer { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin: 18px 4px 0; }
+  footer { align-items: center; }
+  footer a { color: var(--muted); text-decoration: underline; cursor: pointer; }
+  footer select {
+    font: inherit; color: var(--text); background: var(--card);
+    border: 1px solid var(--line); border-radius: 5px; padding: 1px 4px; margin-left: 4px; max-width: 220px;
+  }
+</style>
+</head>
+<body>
+  <section class="card" id="now"></section>
+
+  <h2>Favourites</h2>
+  <section class="card list" id="favourites"></section>
+
+  <h2>Find stations</h2>
+  <form id="search-form">
+    <input type="search" id="query" placeholder="Station name, e.g. jazz, BBC, Trójka" autocomplete="off">
+    <button class="primary" type="submit" id="search-button">Search</button>
+  </form>
+  <div id="results"></div>
+
+  <footer>
+    <label class="speaker">Speaker <select id="speaker"></select></label>
+    <a id="edit-file">Edit stations file</a>
+  </footer>
+
+<script>
+  const send = (action, data = {}) =>
+    window.webkit.messageHandlers.radioCaster.postMessage(JSON.stringify({ action, ...data }));
+
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  // An image, or a coloured tile with the station's initial when it has none or it fails to load.
+  function image(url, name, cls, size) {
+    const tile = `<div class="${cls} placeholder" style="font-size:${Math.round(size / 2.2)}px">${esc([...(name || "").trim()][0] || "?")}</div>`;
+    if (!url) return tile;
+    return `<img class="${cls}" src="${esc(url)}" alt="" onerror="this.outerHTML=this.dataset.fallback" data-fallback="${esc(tile)}">`;
+  }
+
+  let state = null;
+  let volumeDragging = false;
+
+  function renderNow() {
+    const p = state.playing;
+    const starting = state.starting;
+    const el = document.getElementById("now");
+    if (!p) {
+      el.innerHTML = `
+        <div class="now">
+          ${image("", "📻", "art", 76)}
+          <div class="meta">
+            <div class="station">${starting ? `Starting ${esc(starting)}…` : "Nothing playing"}</div>
+            <div class="show">${state.speaker ? `Pick a favourite below or search for a station.` : state.connecting ? `Connecting to ${esc(state.connecting)}…` : "Looking for your speaker…"}</div>
+          </div>
+        </div>
+        ${state.error ? `<div class="controls"><span class="badge">${esc(state.error)}</span></div>` : ""}`;
+      return;
+    }
+    el.innerHTML = `
+      <div class="now">
+        ${image(p.artwork, p.name, "art", 76)}
+        <div class="meta">
+          <div class="station">${esc(p.name)}</div>
+          <div class="song">${p.song ? "♪ " + esc(p.song) : "&nbsp;"}</div>
+          <div class="show">${esc(p.show || "")}</div>
+        </div>
+      </div>
+      <div class="controls">
+        <button id="stop">Stop</button>
+        <span>🔈</span>
+        <input type="range" id="volume" min="0" max="100" step="5" value="${state.volume ?? 0}">
+        <span class="vol" id="volume-label">${state.volume ?? "–"}%</span>
+      </div>`;
+    document.getElementById("stop").onclick = () => send("stop");
+    const slider = document.getElementById("volume");
+    slider.oninput = () => {
+      volumeDragging = true;
+      document.getElementById("volume-label").textContent = slider.value + "%";
+    };
+    slider.onchange = () => {
+      volumeDragging = false;
+      send("volume", { value: Number(slider.value) });
+    };
+  }
+
+  function renderFavourites() {
+    const el = document.getElementById("favourites");
+    if (!state.favourites.length) {
+      el.innerHTML = `<div class="empty">No favourites yet. Search below and press ☆ Add.</div>`;
+      return;
+    }
+    const playingStream = state.playing && state.playing.stream;
+    el.innerHTML = state.favourites.map((f, i) => {
+      const playing = f.stream === playingStream;
+      const starting = !playing && f.name === state.starting;
+      return `
+        <div class="row clickable ${playing ? "playing" : ""}" data-i="${i}">
+          ${image(f.icon, f.name, "icon", 32)}
+          <div class="name">
+            <div class="title">${esc(f.name)}</div>
+            <div class="sub">${playing ? `<span class="badge">▶ Playing</span>` : starting ? "Starting…" : "Click to play"}</div>
+          </div>
+          <div class="actions"><button class="danger hover-only" data-remove="${i}">Remove</button></div>
+        </div>`;
+    }).join("");
+    el.querySelectorAll(".row").forEach((row) => {
+      row.onclick = () => send("play_favourite", { id: state.favourites[row.dataset.i].id });
+    });
+    el.querySelectorAll("[data-remove]").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        if (btn.classList.contains("armed")) {
+          send("remove", { id: state.favourites[btn.dataset.remove].id });
+        } else {
+          btn.classList.add("armed");
+          btn.textContent = "Click to confirm";
+          setTimeout(() => { btn.classList.remove("armed"); btn.textContent = "Remove"; }, 3000);
+        }
+      };
+    });
+  }
+
+  // Chosen stream variant per result, kept across re-renders; reset by a new search.
+  let selected = {};
+  let selectedFor = null;
+
+  function renderResults() {
+    const s = state.search;
+    const el = document.getElementById("results");
+    document.getElementById("search-button").disabled = s.busy;
+    if (s.busy) { el.innerHTML = `<div class="hint">Searching for “${esc(s.query)}”…</div>`; return; }
+    if (s.error) { el.innerHTML = `<div class="hint">Search failed: ${esc(s.error)}</div>`; return; }
+    if (!s.query) { el.innerHTML = `<div class="hint">Search ~50,000 stations from radio-browser.info.</div>`; return; }
+    if (!s.results.length) { el.innerHTML = `<div class="hint">No stations found for “${esc(s.query)}”.</div>`; return; }
+    if (selectedFor !== s.query) { selected = {}; selectedFor = s.query; }
+    const input = document.getElementById("query");
+    if (!input.value) input.value = s.query;
+
+    const playingStream = state.playing && state.playing.stream;
+    el.innerHTML = `<div class="card list">` + s.results.map((r, i) => {
+      const playingVariant = r.variants.findIndex((v) => v.stream === playingStream);
+      const v = selected[i] ?? (playingVariant >= 0 ? playingVariant : 0);
+      const variant = r.variants[v];
+      const format = r.variants.length > 1
+        ? `<select data-variant="${i}" title="Stream format">` + r.variants.map((x, j) =>
+            `<option value="${j}" ${j === v ? "selected" : ""}>${esc(x.label)}${j === 0 ? " (best)" : ""}</option>`).join("") + `</select>`
+        : esc(variant.label);
+      return `
+        <div class="row ${playingVariant >= 0 ? "playing" : ""}">
+          ${image(r.icon, r.name, "icon", 32)}
+          <div class="name">
+            <div class="title">${esc(r.name)}</div>
+            <div class="sub">${playingVariant >= 0 ? `<span class="badge">▶ Playing</span> · ` : ""}${esc(r.country)}${r.country ? " · " : ""}${format}</div>
+          </div>
+          <div class="actions">
+            <button data-play="${i}">Play</button>
+            <button data-add="${i}" ${variant.favourite ? "disabled" : ""}>${variant.favourite ? "★ Added" : "☆ Add"}</button>
+          </div>
+        </div>`;
+    }).join("") + `</div>`;
+
+    const variantOf = (i) => selected[i] ?? Math.max(0, s.results[i].variants.findIndex((v) => v.stream === playingStream));
+    el.querySelectorAll("[data-variant]").forEach((sel) => (sel.onchange = () => {
+      selected[sel.dataset.variant] = Number(sel.value);
+      renderResults();
+    }));
+    el.querySelectorAll("[data-play]").forEach((b) => (b.onclick = () =>
+      send("play_result", { index: Number(b.dataset.play), variant: variantOf(b.dataset.play) })));
+    el.querySelectorAll("[data-add]").forEach((b) => (b.onclick = () =>
+      send("add_result", { index: Number(b.dataset.add), variant: variantOf(b.dataset.add) })));
+  }
+
+  function render(newState) {
+    // Don't yank the volume slider while it's being dragged.
+    if (volumeDragging && state) newState = { ...newState, volume: state.volume };
+    state = newState;
+    renderNow();
+    renderFavourites();
+    renderResults();
+    renderSpeakers();
+  }
+
+  function renderSpeakers() {
+    const sel = document.getElementById("speaker");
+    const current = state.connecting || state.speaker || state.wanted_speaker || "";
+    const options = state.speakers.map((sp) => sp.name);
+    if (current && !options.includes(current)) options.unshift(current);  // chosen but not found yet
+    const label = (name) => {
+      const sp = state.speakers.find((x) => x.name === name);
+      if (name === state.connecting) return `${name} (connecting…)`;
+      if (!sp) return `${name} (looking…)`;
+      return sp.group ? `${name} (group)` : name;
+    };
+    sel.innerHTML = (current ? "" : `<option value="" selected>Looking for speakers…</option>`) +
+      options.map((name) => `<option value="${esc(name)}" ${name === current ? "selected" : ""}>${esc(label(name))}</option>`).join("");
+    sel.disabled = !state.speakers.length;
+  }
+  document.getElementById("speaker").onchange = (e) => {
+    if (e.target.value) send("speaker", { name: e.target.value });
+  };
+
+  function focusSearch() {
+    const q = document.getElementById("query");
+    q.focus();
+    q.select();
+  }
+
+  document.getElementById("search-form").onsubmit = (e) => {
+    e.preventDefault();
+    const query = document.getElementById("query").value.trim();
+    if (query) send("search", { query });
+  };
+  document.getElementById("edit-file").onclick = () => send("edit_file");
+
+  send("ready");
+</script>
+</body>
+</html>

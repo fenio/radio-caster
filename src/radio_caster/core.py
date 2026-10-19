@@ -14,6 +14,7 @@ from pathlib import Path
 import pychromecast
 
 CONFIG = Path.home() / ".config" / "radio-caster" / "stations.json"
+SETTINGS = CONFIG.parent / "settings.json"
 ICON_CACHE = Path.home() / "Library" / "Caches" / "radio-caster" / "icons"
 DIRECTORY_API = "https://de1.api.radio-browser.info/json"
 USER_AGENT = "RadioCaster/1.0"
@@ -95,6 +96,20 @@ def remove_favourite(station_id):
     save_favourites([s for s in load_favourites() if s.id != station_id])
 
 
+def load_settings():
+    try:
+        return json.loads(SETTINGS.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_setting(key, value):
+    settings = load_settings()
+    settings[key] = value
+    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
+
+
 # --- Directory ----------------------------------------------------------------
 
 
@@ -104,32 +119,78 @@ def fetch_json(url):
         return json.load(r)
 
 
+@dataclass(frozen=True)
+class Variant:
+    station: Station
+    label: str  # e.g. "MP3 128k"
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    """One station from the directory, with all its stream variants, best first."""
+
+    name: str
+    country: str
+    icon: str
+    variants: list[Variant]
+
+
+# Formats the Default Media Receiver plays reliably, preferred in this order.
+GOOD_CODECS = {"MP3": 3, "AAC": 2, "AAC+": 2}
+
+
 def search_directory(query, limit=15):
-    """Stations from radio-browser.info, most popular first."""
+    """Stations from radio-browser.info, most popular first.
+
+    The directory lists the same station many times (different spellings, formats
+    and bitrates), so entries are grouped by normalised name and country.
+    """
     params = urllib.parse.urlencode(
-        {"name": query, "limit": limit, "hidebroken": "true", "order": "clickcount", "reverse": "true"}
+        {"name": query, "limit": 100, "hidebroken": "true", "order": "clickcount", "reverse": "true"}
     )
-    results = []
+    groups = {}  # key -> list of directory entries, most popular first
     for s in fetch_json(f"{DIRECTORY_API}/stations/search?{params}"):
-        codec = s.get("codec", "").upper()
-        content_type = {"AAC": "audio/aac", "AAC+": "audio/aac"}.get(codec, "audio/mpeg")
-        if s.get("hls") or s["url_resolved"].endswith(".m3u8"):
-            content_type = "application/x-mpegURL"
-        details = ", ".join(x for x in (s.get("countrycode"), codec, s.get("bitrate") and f"{s['bitrate']}k") if x)
-        results.append(
-            (
-                Station(
-                    id=s["stationuuid"],
-                    name=s["name"].strip(),
-                    stream=s["url_resolved"],
-                    artwork=s.get("favicon", ""),
-                    icon=s.get("favicon", ""),
-                    content_type=content_type,
-                ),
-                details,
-            )
+        name = re.sub(r"[^\w]+", " ", s["name"].casefold()).strip()
+        name = re.sub(r"^radio\s+|\s+radio$", "", name).replace(" ", "")
+        groups.setdefault((name or s["name"], s.get("countrycode", "")), []).append(s)
+
+    results = []
+    for entries in list(groups.values())[:limit]:
+        best = sorted(
+            entries,
+            key=lambda s: (GOOD_CODECS.get(s.get("codec", "").upper(), 0), s.get("bitrate") or 0, s.get("clickcount") or 0),
+            reverse=True,
         )
+        top = entries[0]  # most popular spelling and logo
+        icon = next((s["favicon"] for s in entries if s.get("favicon")), "")
+        # One stream per format and bitrate: the rest are mirrors nobody can tell apart.
+        variants, seen = [], set()
+        for s in best:
+            if _label(s) not in seen:
+                seen.add(_label(s))
+                variants.append(Variant(_station(s, top["name"].strip(), icon), _label(s)))
+        results.append(SearchResult(top["name"].strip(), top.get("countrycode", ""), icon, variants))
     return results
+
+
+def _station(s, name, icon):
+    codec = s.get("codec", "").upper()
+    content_type = {"AAC": "audio/aac", "AAC+": "audio/aac"}.get(codec, "audio/mpeg")
+    if s.get("hls") or s["url_resolved"].endswith(".m3u8"):
+        content_type = "application/x-mpegURL"
+    return Station(
+        id=s["stationuuid"],
+        name=name,
+        stream=s["url_resolved"],
+        artwork=icon,
+        icon=icon,
+        content_type=content_type,
+    )
+
+
+def _label(s):
+    codec = s.get("codec", "").upper() or "Stream"
+    return f"{codec} {s['bitrate']}k" if s.get("bitrate") else codec
 
 
 # --- Now playing --------------------------------------------------------------
