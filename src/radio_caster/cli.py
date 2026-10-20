@@ -12,6 +12,7 @@ Usage:
   radio-caster speaker            list speakers (* = the one in use)
   radio-caster speaker <name>     use this speaker from now on (app and command line)
   radio-caster menubar            run the menu bar app
+  radio-caster open               show the app's window, starting the app if needed
 
 Favourites live in ~/.config/radio-caster/stations.json (created on first run).
 -d "Living Room" or the RADIOCASTER_DEVICE env var overrides the saved speaker
@@ -41,7 +42,7 @@ def main():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("command", help="list, now, search, add, stop, vol, speaker, menubar, or a favourite's id")
+    p.add_argument("command", help="list, now, search, add, stop, vol, speaker, menubar, open, or a favourite's id")
     p.add_argument("args", nargs="*")
     p.add_argument("-d", "--device", default=os.environ.get("RADIOCASTER_DEVICE"))
     args = p.parse_args()
@@ -50,6 +51,12 @@ def main():
         from .menubar import run
 
         run(args.device)
+        return
+
+    if args.command == "open":
+        from . import launcher
+
+        launcher.open_app(launcher.executable())
         return
 
     favourites = {s.id: s for s in load_favourites()}

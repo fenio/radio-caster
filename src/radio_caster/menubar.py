@@ -17,6 +17,7 @@ from PyObjCTools.AppHelper import callAfter
 from pychromecast.config import APP_MEDIA_RECEIVER
 from pychromecast.discovery import CastBrowser, SimpleCastListener
 
+from . import launcher
 from .core import (
     CONFIG,
     add_favourite,
@@ -458,6 +459,13 @@ def volume_slider(value, callback):
 
 def run(device=None):
     app = RadioApp(device)
+    app.observer = launcher.listen(app.open_window)
+    app.lock = launcher.acquire_lock()  # after listen(), so `radio-caster open` never finds it deaf
+    if app.lock is None:
+        print("Radio Caster is already running.")
+        return
+    if launcher.take_window_request():
+        callAfter(app.open_window)
     # Menu bar only, no Dock icon.
     AppKit.NSApplication.sharedApplication().setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
     install_edit_menu()

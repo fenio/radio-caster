@@ -15,9 +15,12 @@ macOS menu bar or the command line.
 ## Install
 
 ```sh
-brew install fenio/tap/radio-caster
-brew services start radio-caster   # run the menu bar app now and at login
+brew install --cask fenio/tap/radio-caster-app   # Radio Caster.app, plus the radio-caster formula
+brew services start radio-caster                 # optional: run it at login
 ```
+
+*Radio Caster* in Spotlight or Applications starts the menu bar app and shows its window
+(`radio-caster open` does the same). Without the app: `brew install fenio/tap/radio-caster`.
 
 ## Command line
 
@@ -33,6 +36,7 @@ radio-caster vol 40             set volume to 40%
 radio-caster speaker            list speakers (* = the one in use)
 radio-caster speaker <name>     use this speaker from now on (app and command line)
 radio-caster menubar            run the menu bar app
+radio-caster open               show the app's window, starting the app if needed
 ```
 
 ## Speakers
