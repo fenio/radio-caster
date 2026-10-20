@@ -7,6 +7,7 @@ Favourites come from ~/.config/radio-caster/stations.json (see core.py).
 
 import subprocess
 import threading
+import time
 
 import AppKit
 import pychromecast
@@ -50,6 +51,9 @@ class RadioApp(rumps.App):
         self.info = None  # NowPlaying of self.playing, maintained by the poll thread
         self.station_changed = threading.Event()  # wakes the poll thread early
         self.volume = None  # 0-100, maintained by refresh()
+        self.volume_touched = 0  # monotonic time of the last change made here, see refresh()
+        self.volume_lock = threading.Lock()
+        self.pending_volume = None  # latest slider value not yet sent to the speaker
         self.starting = None  # Station being started, until the speaker reports it playing
         self.error = None
         self.icons = {}  # icon URL -> local file, filled in the background
@@ -77,9 +81,8 @@ class RadioApp(rumps.App):
         self.song_item = rumps.MenuItem("Nothing playing")
         self.show_item = rumps.MenuItem(" ")
         self.station_items = {s.id: rumps.MenuItem(s.name, callback=self.on_station) for s in self.favourites}
-        self.volume_menu = rumps.MenuItem("Volume")
-        for v in range(10, 101, 10):
-            self.volume_menu.add(rumps.MenuItem(f"{v}%", callback=self.on_volume))
+        self.volume_item = rumps.MenuItem(self.volume_title())
+        self.volume_slider = volume_slider(self.volume or 0, self.on_volume)
         self.speaker_menu = rumps.MenuItem(self.speaker_title())
         for name, info in self.sorted_devices():
             item = rumps.MenuItem(
@@ -100,11 +103,16 @@ class RadioApp(rumps.App):
             rumps.MenuItem("Find Stations…", callback=lambda _: self.open_window(focus_search=True), key="f"),
             None,
             rumps.MenuItem("Stop", callback=lambda _: self.stop()),
-            self.volume_menu,
+            self.volume_item,
+            self.volume_slider,
+            None,
             self.speaker_menu,
             None,
             rumps.MenuItem("Quit Radio Caster", callback=rumps.quit_application, key="q"),
         ]
+
+    def volume_title(self):
+        return "Volume" if self.volume is None else f"Volume: {self.volume}%"
 
     def speaker_title(self):
         if self.connecting:
@@ -352,14 +360,41 @@ class RadioApp(rumps.App):
         self.in_background(lambda: self.cast.quit_app())
 
     def set_volume(self, percent):
+        # Dragging the slider fires many changes; one thread sends the latest until it catches up.
+        if self.cast is None:
+            self.in_background(None)  # reports there's no speaker
+            return
         self.volume = percent
-        self.in_background(lambda: self.cast.set_volume(percent / 100))
+        self.volume_touched = time.monotonic()
+        self.volume_item.title = self.volume_title()
+        self.volume_slider.value = percent  # when changed from the window
+        with self.volume_lock:
+            already_sending = self.pending_volume is not None
+            self.pending_volume = percent
+        if already_sending:
+            return
+
+        def send():
+            while True:
+                with self.volume_lock:
+                    percent = self.pending_volume
+                try:
+                    self.cast.set_volume(percent / 100)
+                finally:
+                    with self.volume_lock:
+                        if self.pending_volume == percent:
+                            self.pending_volume = None
+                            return
+
+        self.in_background(send)
 
     def on_station(self, sender):
         self.start(next(s for s in self.favourites if self.station_items[s.id] is sender))
 
     def on_volume(self, sender):
-        self.set_volume(int(sender.title.rstrip("%")))
+        percent = round(sender.value)
+        if percent != self.volume:
+            self.set_volume(percent)
 
     # --- Status -------------------------------------------------------------------
 
@@ -401,12 +436,24 @@ class RadioApp(rumps.App):
             self.song_item.title = "Nothing playing"
             self.show_item.title = " "
 
-        if self.cast.status:
+        # The speaker reports a change made here a moment later, so don't jump the slider back meanwhile.
+        if self.cast.status and time.monotonic() - self.volume_touched > 3:
             self.volume = round((self.cast.status.volume_level or 0) * 100)
-        for item in self.volume_menu.values():
-            item.state = int(self.volume is not None and item.title == f"{round(self.volume, -1)}%")
+            self.volume_slider.value = self.volume
+        self.volume_item.title = self.volume_title()
 
         self.push_state()
+
+
+def volume_slider(value, callback):
+    """A slider inside the menu, inset to line up with the item titles."""
+    item = rumps.SliderMenuItem(value=value, min_value=0, max_value=100, callback=callback, dimensions=(200, 22))
+    slider = item._slider
+    container = AppKit.NSView.alloc().initWithFrame_(((0, 0), (245, 26)))
+    item._menuitem.setView_(container)  # first: replacing the view detaches the old one (the slider)
+    slider.setFrameOrigin_((25, 2))
+    container.addSubview_(slider)
+    return item
 
 
 def run(device=None):
