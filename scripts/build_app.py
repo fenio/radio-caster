@@ -7,6 +7,7 @@ no Python in it and needs rebuilding only when this script changes.
 """
 
 import plistlib
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -15,16 +16,18 @@ from AppKit import (
     NSBezierPath,
     NSBitmapImageRep,
     NSColor,
-    NSFont,
-    NSFontAttributeName,
+    NSCompositingOperationSourceOver,
+    NSGradient,
     NSGraphicsContext,
+    NSImage,
     NSPNGFileType,
-    NSString,
 )
 
 from radio_caster import __version__
 
-DIST = Path(__file__).resolve().parent.parent / "dist"
+ROOT = Path(__file__).resolve().parent.parent
+DIST = ROOT / "dist"
+RADIO = ROOT / "assets" / "radio.png"  # Noto Emoji, see assets/README.md
 
 LAUNCHER = """#!/bin/sh
 # Shows Radio Caster's window, starting the menu bar app if it isn't running.
@@ -60,10 +63,12 @@ def build(app):
     script.write_text(LAUNCHER)
     script.chmod(0o755)
     make_icon(contents / "Resources" / "AppIcon.icns")
+    shutil.copy(ROOT / "assets" / "noto-emoji-LICENSE", contents / "Resources" / "Icon-LICENSE.txt")
 
 
 def make_icon(dest):
-    """The 📻 emoji on a rounded tile in the window's accent colour, as an .icns."""
+    """The Noto radio on a dark rounded tile, as an .icns."""
+    radio = NSImage.alloc().initWithContentsOfFile_(str(RADIO))
     with tempfile.TemporaryDirectory() as tmp:
         iconset = Path(tmp) / "AppIcon.iconset"
         iconset.mkdir()
@@ -75,15 +80,23 @@ def make_icon(dest):
                 )
                 NSGraphicsContext.saveGraphicsState()
                 NSGraphicsContext.setCurrentContext_(NSGraphicsContext.graphicsContextWithBitmapImageRep_(rep))
+                NSGraphicsContext.currentContext().setImageInterpolation_(3)  # NSImageInterpolationHigh
+                # The macOS icon grid: an 80% tile, centred.
                 inset, size = px * 0.1, px * 0.8
-                NSColor.colorWithSRGBRed_green_blue_alpha_(0.91, 0.27, 0.17, 1).setFill()
-                NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                    ((inset, inset), (size, size)), size * 0.22, size * 0.22
-                ).fill()
-                emoji = NSString.stringWithString_("📻")
-                attrs = {NSFontAttributeName: NSFont.systemFontOfSize_(size * 0.62)}
-                w, h = emoji.sizeWithAttributes_(attrs)
-                emoji.drawAtPoint_withAttributes_(((px - w) / 2, (px - h) / 2), attrs)
+                tile = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                    ((inset, inset), (size, size)), size * 0.225, size * 0.225
+                )
+                NSGradient.alloc().initWithStartingColor_endingColor_(
+                    NSColor.colorWithSRGBRed_green_blue_alpha_(0.20, 0.24, 0.32, 1),
+                    NSColor.colorWithSRGBRed_green_blue_alpha_(0.09, 0.11, 0.16, 1),
+                ).drawInBezierPath_angle_(tile, -90)
+                art = size * 0.78
+                radio.drawInRect_fromRect_operation_fraction_(
+                    (((px - art) / 2, (px - art) / 2), (art, art)),
+                    ((0, 0), (0, 0)),
+                    NSCompositingOperationSourceOver,
+                    1.0,
+                )
                 NSGraphicsContext.restoreGraphicsState()
                 name = f"icon_{points}x{points}{'@2x' if scale == 2 else ''}.png"
                 rep.representationUsingType_properties_(NSPNGFileType, {}).writeToFile_atomically_(
