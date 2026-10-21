@@ -381,11 +381,14 @@ class RadioApp(rumps.App):
                     percent = self.pending_volume
                 try:
                     self.cast.set_volume(percent / 100)
-                finally:
+                except Exception:
                     with self.volume_lock:
-                        if self.pending_volume == percent:
-                            self.pending_volume = None
-                            return
+                        self.pending_volume = None  # so the next change starts a new sender
+                    raise
+                with self.volume_lock:
+                    if self.pending_volume == percent:
+                        self.pending_volume = None
+                        return
 
         self.in_background(send)
 
