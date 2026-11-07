@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -253,6 +254,23 @@ def icy_now_playing(stream):
     if not sep:
         return NowPlaying(song=title) if title else NowPlaying()
     return NowPlaying(artist.strip(), song.strip())
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None  # makes urllib raise the 3xx as an HTTPError, with its Location
+
+
+def redirect_target(url):
+    """Where a stream URL redirects (one hop): other apps often cast that address instead."""
+    req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": USER_AGENT})
+    try:
+        urllib.request.build_opener(_NoRedirect).open(req, timeout=5).close()
+    except urllib.error.HTTPError as e:
+        return e.headers.get("Location")
+    except OSError:
+        pass
+    return None
 
 
 def describe(info):

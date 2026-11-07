@@ -8,18 +8,21 @@ Favourites come from ~/.config/radio-caster/stations.json (see core.py).
 import subprocess
 import threading
 import time
+import urllib.parse
 
 import AppKit
 import pychromecast
 import rumps
 import zeroconf
 from PyObjCTools.AppHelper import callAfter
-from pychromecast.config import APP_MEDIA_RECEIVER
+from pychromecast.controllers.media import MediaStatus
 from pychromecast.discovery import CastBrowser, SimpleCastListener
 
 from . import launcher
 from .core import (
     CONFIG,
+    NowPlaying,
+    Station,
     add_favourite,
     describe,
     icon_file,
@@ -28,6 +31,7 @@ from .core import (
     load_settings,
     now_playing,
     play,
+    redirect_target,
     remember_host,
     remove_favourite,
     save_setting,
@@ -36,6 +40,20 @@ from .core import (
 from .window import MainWindow, install_edit_menu
 
 ICON = "📻"
+DEFAULT_RECEIVER = "Default Media Receiver"
+
+# pychromecast reads only contentId, but newer senders (e.g. Nowy Świat's phone app) put the stream in contentUrl.
+_media_update = MediaStatus.update
+
+
+def _update_with_url(self, data):
+    _media_update(self, data)
+    status = (data.get("status") or [{}])[0]
+    media = status.get("media") or (status.get("extendedStatus") or {}).get("media") or {}
+    self.content_id = media.get("contentUrl") or self.content_id
+
+
+MediaStatus.update = _update_with_url
 POLL_SECONDS = 15
 
 
@@ -52,6 +70,7 @@ class RadioApp(rumps.App):
         self.last_played = None  # so stations played from search results are recognised too
         self.playing = None  # Station, maintained by refresh() from the cast status
         self.info = None  # NowPlaying of self.playing, maintained by the poll thread
+        self.shown_info = None  # self.info, or what the speaker itself reports; set by refresh()
         self.station_changed = threading.Event()  # wakes the poll thread early
         self.volume = None  # 0-100, maintained by refresh()
         self.volume_touched = 0  # monotonic time of the last change made here, see refresh()
@@ -60,6 +79,7 @@ class RadioApp(rumps.App):
         self.starting = None  # Station being started, until the speaker reports it playing
         self.error = None
         self.icons = {}  # icon URL -> local file, filled in the background
+        self.redirects = {}  # where favourites' streams redirect, as other apps cast those addresses
         self.search = {"query": "", "busy": False, "error": None}
         self.results = []  # SearchResults from the last directory search
         self.window = None  # created on first open
@@ -79,6 +99,10 @@ class RadioApp(rumps.App):
         self.config_mtime = CONFIG.stat().st_mtime
         self.fetch_icons(self.favourites)
         self.build_menu()
+        stations = self.favourites
+        threading.Thread(
+            target=lambda: self.redirects.update({redirect_target(s.stream): s.stream for s in stations}), daemon=True
+        ).start()
 
     def build_menu(self):
         self.song_item = rumps.MenuItem("Nothing playing")
@@ -232,8 +256,8 @@ class RadioApp(rumps.App):
                     "name": playing.name,
                     "stream": playing.stream,
                     "artwork": playing.artwork or playing.icon,
-                    "song": describe(self.info),
-                    "show": self.info and self.info.show,
+                    "song": describe(self.shown_info),
+                    "show": self.shown_info and self.shown_info.show,
                 },
                 "favourites": [{"id": s.id, "name": s.name, "icon": s.icon, "stream": s.stream} for s in self.favourites],
                 "search": {
@@ -416,9 +440,20 @@ class RadioApp(rumps.App):
             return
 
         mc = self.cast.media_controller.status
-        active = self.cast.app_id == APP_MEDIA_RECEIVER and mc.player_state in ("PLAYING", "BUFFERING")
+        active = mc.player_state in ("PLAYING", "BUFFERING")
         candidates = [*self.favourites, *([self.last_played] if self.last_played else [])]
-        playing = next((s for s in candidates if active and mc.content_id == s.stream), None)
+        # The stations' own apps (e.g. Radio 357 on a phone) cast with their receiver, no stream URL, but their name.
+        names = {(mc.title or "").casefold(), (self.cast.app_display_name or "").casefold()}
+        url = self.redirects.get(mc.content_id, mc.content_id)
+        playing = next((s for s in candidates if active and (url == s.stream or s.name.casefold() in names)), None)
+        app = self.cast.app_display_name
+        if active and not playing:  # anything else: show what the speaker tells about it
+            playing = Station(
+                id="",
+                name=(app != DEFAULT_RECEIVER and app) or mc.title or urllib.parse.urlparse(url or "").hostname or "?",
+                stream=url or "",
+                artwork=(mc.images[0].url if mc.images else ""),
+            )
         for s in self.favourites:
             self.station_items[s.id].state = int(playing is not None and playing.stream == s.stream)
         if playing != self.playing:
@@ -437,6 +472,9 @@ class RadioApp(rumps.App):
             self.title = ICON
 
         info = self.info
+        if playing and not playing.id and mc.artist:
+            info = NowPlaying(mc.artist, mc.title)  # e.g. Spotify reports the track itself
+        self.shown_info = info
         if playing:
             self.song_item.title = f"♪ {describe(info) or '…'}"
             self.show_item.title = (info and info.show) or playing.name
