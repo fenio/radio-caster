@@ -110,6 +110,18 @@ def save_setting(key, value):
     SETTINGS.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
 
 
+def known_hosts():
+    """Speakers' last addresses, polled directly because some routers drop their mDNS announcements."""
+    # shortcut: a speaker that changes IP while mDNS is broken is lost again; a DHCP reservation avoids it.
+    return list(load_settings().get("hosts", {}).values())
+
+
+def remember_host(info):
+    hosts = load_settings().get("hosts", {})
+    if info.friendly_name and hosts.get(info.friendly_name) != info.host:
+        save_setting("hosts", {**hosts, info.friendly_name: info.host})
+
+
 # --- Directory ----------------------------------------------------------------
 
 
@@ -295,12 +307,15 @@ def play(cast, station):
 
 def find_cast(name):
     if name:
-        casts, browser = pychromecast.get_listed_chromecasts(friendly_names=[name], timeout=10)
+        casts, browser = pychromecast.get_listed_chromecasts(
+            friendly_names=[name], known_hosts=known_hosts(), timeout=10
+        )
     else:
-        casts, browser = pychromecast.get_chromecasts(timeout=10)
+        casts, browser = pychromecast.get_chromecasts(known_hosts=known_hosts(), timeout=10)
     if not casts:
         browser.stop_discovery()
         sys.exit(f"No Chromecast found{f' named {name!r}' if name else ''}.")
     cast = casts[0]
     cast.wait()
+    remember_host(cast.cast_info)
     return cast, browser

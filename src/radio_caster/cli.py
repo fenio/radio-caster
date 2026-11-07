@@ -29,10 +29,12 @@ from .core import (
     add_favourite,
     describe,
     find_cast,
+    known_hosts,
     load_favourites,
     load_settings,
     now_playing,
     play,
+    remember_host,
     save_setting,
     search_directory,
 )
@@ -97,8 +99,10 @@ def main():
             save_setting("speaker", " ".join(args.args))
             print(f"Using {' '.join(args.args)!r} from now on.")
             return
-        casts, browser = pychromecast.get_chromecasts(timeout=10)
+        casts, browser = pychromecast.get_chromecasts(known_hosts=known_hosts(), timeout=10)
         browser.stop_discovery()
+        for c in casts:
+            remember_host(c.cast_info)
         for c in sorted(casts, key=lambda c: (c.cast_info.cast_type == "group", c.cast_info.friendly_name)):
             mark = "*" if c.cast_info.friendly_name == speaker else " "
             kind = "group" if c.cast_info.cast_type == "group" else c.cast_info.model_name

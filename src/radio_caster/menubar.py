@@ -23,10 +23,12 @@ from .core import (
     add_favourite,
     describe,
     icon_file,
+    known_hosts,
     load_favourites,
     load_settings,
     now_playing,
     play,
+    remember_host,
     remove_favourite,
     save_setting,
     search_directory,
@@ -65,7 +67,7 @@ class RadioApp(rumps.App):
         self.load_config()
         self.zconf = zeroconf.Zeroconf()
         changed = lambda *_: callAfter(self.on_devices_changed)  # noqa: E731 - discovery runs on its own thread
-        self.browser = CastBrowser(SimpleCastListener(changed, changed, changed), self.zconf)
+        self.browser = CastBrowser(SimpleCastListener(changed, changed, changed), self.zconf, known_hosts())
         self.browser.start_discovery()
         threading.Thread(target=self.poll_now_playing, daemon=True).start()
         rumps.Timer(self.refresh, 2).start()
@@ -134,6 +136,8 @@ class RadioApp(rumps.App):
         self.devices = {
             info.friendly_name: info for info in list(self.browser.devices.values()) if info.friendly_name
         }
+        for info in self.devices.values():
+            remember_host(info)
         self.ensure_connected()
         self.build_menu()
         self.push_state()
