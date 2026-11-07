@@ -257,6 +257,7 @@ class RadioApp(rumps.App):
                     "stream": playing.stream,
                     "artwork": playing.artwork or playing.icon,
                     "song": describe(self.shown_info),
+                    "host": self.shown_info and self.shown_info.host,
                     "show": self.shown_info and self.shown_info.show,
                 },
                 "favourites": [{"id": s.id, "name": s.name, "icon": s.icon, "stream": s.stream} for s in self.favourites],
@@ -476,7 +477,8 @@ class RadioApp(rumps.App):
             info = NowPlaying(mc.artist, mc.title)  # e.g. Spotify reports the track itself
         self.shown_info = info
         if playing:
-            self.song_item.title = f"♪ {describe(info) or '…'}"
+            song = describe(info)
+            self.song_item.title = f"♪ {song}" if song else (info and info.host and f"🎙 {info.host}") or "♪ …"
             self.show_item.title = (info and info.show) or playing.name
         else:
             self.song_item.title = "Nothing playing"

@@ -1,6 +1,6 @@
 [project]
 name = "radio-caster"
-version = "0.1.0"
+version = "0.1.1"
 description = "Cast internet radio to a Chromecast from the macOS menu bar or the command line"
 readme = "README.md"
 license = "MIT"

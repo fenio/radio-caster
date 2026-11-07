@@ -27,6 +27,7 @@ class NowPlaying:
     artist: str | None = None
     song: str | None = None
     show: str | None = None
+    host: str | None = None  # the show's presenter, shown when no song is on
 
 
 @dataclass(frozen=True)
@@ -231,7 +232,8 @@ def radio357_now_playing(station):
     artist, _, song = (data.get("s") or "").partition(" - ")
     if artist == station.name:  # "Radio 357 - <tagline>" when no song is on
         artist = song = ""
-    return NowPlaying(artist or None, song or None, (data.get("p") or {}).get("n"))
+    show = data.get("p") or {}
+    return NowPlaying(artist or None, song or None, show.get("n"), show.get("a"))
 
 
 def nowyswiat_now_playing():

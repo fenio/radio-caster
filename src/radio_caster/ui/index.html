@@ -162,7 +162,7 @@
         ${image(p.artwork, p.name, "art", 76)}
         <div class="meta">
           <div class="station">${esc(p.name)}</div>
-          <div class="song">${p.song ? "♪ " + esc(p.song) : "&nbsp;"}</div>
+          <div class="song">${p.song ? "♪ " + esc(p.song) : p.host ? "🎙 " + esc(p.host) : "&nbsp;"}</div>
           <div class="show">${esc(p.show || "")}</div>
         </div>
       </div>

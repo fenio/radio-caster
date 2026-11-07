@@ -72,7 +72,7 @@ def main():
         for s in favourites.values():
             info = now_playing(s)
             show = info and info.show and f" [{info.show}]"
-            print(f"{s.name}: {describe(info) or '?'}{show or ''}")
+            print(f"{s.name}: {describe(info) or (info and info.host and f"🎙 {info.host}") or '?'}{show or ''}")
         return
 
     if args.command in ("search", "add"):
